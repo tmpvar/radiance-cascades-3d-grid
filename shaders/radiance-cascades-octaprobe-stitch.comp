@@ -1,0 +1,87 @@
+#version 450
+#extension GL_EXT_scalar_block_layout : enable
+
+#include "../radiance-cascades/shared.h"
+#include "shared.glsl"
+#include <engine/gpu/morton.h>
+
+layout(location = 0) uniform uint level;
+layout(location = 1) uniform uint probeCount;
+
+layout(std430, binding = 0) uniform RadianceCascadeConfigUBO {
+  RadianceCascadesConfig config;
+};
+
+layout(binding = 1, rgba32f) restrict uniform image2DArray octahedralProbeAtlas;
+
+layout(local_size_x = 16) in;
+
+void
+main() {
+  const uint probeIndex = gl_GlobalInvocationID.x;
+  if (probeIndex >= probeCount) {
+    return;
+  }
+
+  int d = int(config.atlasProbeDiameter << level);
+  int pd = int(d + OCTAPROBE_PADDING);
+  int ppd = int(OCTAPROBE_PADDED_DIAMETER(d));
+
+  ivec2 probeOffset = ivec2(MortonDecode2D(probeIndex) * ppd);
+
+  // bottom edge
+  for (int cell = 0; cell < d; cell++) {
+    ivec3 src = ivec3(probeOffset + ivec2(pd - cell - OCTAPROBE_PADDING, OCTAPROBE_PADDING), level);
+    ivec3 dst = ivec3(probeOffset + ivec2(cell + OCTAPROBE_PADDING, 0), level);
+    imageStore(octahedralProbeAtlas, dst, imageLoad(octahedralProbeAtlas, src));
+  }
+
+  // top edge
+  for (int cell = 0; cell < d; cell++) {
+    ivec3 src = ivec3(probeOffset + ivec2(pd - cell - OCTAPROBE_PADDING, d), level);
+    ivec3 dst = ivec3(probeOffset + ivec2(cell + OCTAPROBE_PADDING, pd), level);
+    imageStore(octahedralProbeAtlas, dst, imageLoad(octahedralProbeAtlas, src));
+  }
+
+  // left edge
+  for (int cell = 0; cell < d; cell++) {
+    ivec3 src = ivec3(probeOffset + ivec2(OCTAPROBE_PADDING, pd - cell - OCTAPROBE_PADDING), level);
+    ivec3 dst = ivec3(probeOffset + ivec2(0, cell + OCTAPROBE_PADDING), level);
+    imageStore(octahedralProbeAtlas, dst, imageLoad(octahedralProbeAtlas, src));
+  }
+
+  // right edge
+  for (int cell = 0; cell < d; cell++) {
+    ivec3 src = ivec3(probeOffset + ivec2(d, pd - cell - OCTAPROBE_PADDING), level);
+    ivec3 dst = ivec3(probeOffset + ivec2(pd, cell + OCTAPROBE_PADDING), level);
+    imageStore(octahedralProbeAtlas, dst, imageLoad(octahedralProbeAtlas, src));
+  }
+
+  // bottom left corner
+  {
+    ivec3 src = ivec3(probeOffset + ivec2(d), level);
+    ivec3 dst = ivec3(probeOffset + ivec2(0, 0), level);
+    imageStore(octahedralProbeAtlas, dst, imageLoad(octahedralProbeAtlas, src));
+  }
+
+  // bottom right corner
+  {
+    ivec3 src = ivec3(probeOffset + ivec2(OCTAPROBE_PADDING, d), level);
+    ivec3 dst = ivec3(probeOffset + ivec2(pd, 0), level);
+    imageStore(octahedralProbeAtlas, dst, imageLoad(octahedralProbeAtlas, src));
+  }
+
+  // top right corner
+  {
+    ivec3 src = ivec3(probeOffset + ivec2(OCTAPROBE_PADDING), level);
+    ivec3 dst = ivec3(probeOffset + ivec2(pd), level);
+    imageStore(octahedralProbeAtlas, dst, imageLoad(octahedralProbeAtlas, src));
+  }
+
+  // top left corner
+  {
+    ivec3 src = ivec3(probeOffset + ivec2(d, OCTAPROBE_PADDING), level);
+    ivec3 dst = ivec3(probeOffset + ivec2(0, pd), level);
+    imageStore(octahedralProbeAtlas, dst, imageLoad(octahedralProbeAtlas, src));
+  }
+}

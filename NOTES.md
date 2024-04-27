@@ -1,0 +1,2 @@
+- reflections should be vertical if they are skewed, then there is likely a problem during merge
+- one reason for this skew is merging. remember that this is not a mindless interpolation at 0.25/0.75 it's a bit more involved because the lower level will have a probe in a negative cell relative to the upper cascade. see: https://discord.com/channels/354027975412416523/1151590411853365360/1214409769658355762

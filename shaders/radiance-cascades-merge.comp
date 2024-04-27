@@ -1,0 +1,119 @@
+#version 450
+#extension GL_EXT_scalar_block_layout : enable
+
+#include "../radiance-cascades/shared.h"
+#include "shared.glsl"
+
+layout(location = 0) uniform uint lowerLevel;
+layout(location = 1) uniform sampler2DArray octahedralProbeAtlasTexture;
+layout(location = 2) uniform float mergeTexelGatherOffset;
+layout(location = 3) uniform float mergeTexelGatherRatio;
+layout(location = 4) uniform uint maxLevel;
+
+layout(std430, binding = 0) uniform RadianceCascadeConfigUBO {
+  RadianceCascadesConfig config;
+};
+
+layout(binding = 1, rgba32f) restrict uniform image2DArray octahedralProbeAtlas;
+
+#include "probes.glsl"
+
+layout(local_size_x = 16) in;
+
+#define MergeOffsetProbe(ox, oy, oz)                                                     \
+  MergeUpperProbesSampleProbe(min(upperProbeGridPos + vec3(ox, oy, oz), hi),             \
+                              upperAtlasProbeDiameter,                                   \
+                              upperLevel,                                                \
+                              upperProbeTexel)
+
+
+MapResult
+MergeUpperProbesSampleProbe(vec3 upperProbeGridPos,
+                            uint upperAtlasProbeDiameter,
+                            int level,
+                            vec2 texel) {
+
+  upperProbeGridPos = max(vec3(0.0), floor(upperProbeGridPos));
+
+  uint upperProbeIndex = MortonEncode(uvec3(upperProbeGridPos));
+  vec2 upperProbeOffset = vec2(MortonDecode2D(upperProbeIndex) *
+                               OCTAPROBE_PADDED_DIAMETER(upperAtlasProbeDiameter));
+  vec2 src = upperProbeOffset + texel + OCTAPROBE_PADDING + 0.5;
+
+  MapResult c00 = UnpackMapResult(
+    texelFetch(octahedralProbeAtlasTexture, ivec3(src + vec2(0, 0), level), 0));
+  MapResult c10 = UnpackMapResult(
+    texelFetch(octahedralProbeAtlasTexture, ivec3(src + vec2(1, 0), level), 0));
+  MapResult c01 = UnpackMapResult(
+    texelFetch(octahedralProbeAtlasTexture, ivec3(src + vec2(0, 1), level), 0));
+  MapResult c11 = UnpackMapResult(
+    texelFetch(octahedralProbeAtlasTexture, ivec3(src + vec2(1, 1), level), 0));
+
+  MapResult r;
+  r.color = (c00.color + c10.color + c01.color + c11.color) * 0.25;
+  r.emission = (c00.emission + c10.emission + c01.emission + c11.emission) * 0.25;
+  r.throughput = (c00.throughput + c10.throughput + c01.throughput + c11.throughput) *
+                 0.25;
+  r.d = min(min(c00.d, c10.d), min(c01.d, c11.d));
+  return r;
+}
+
+
+void
+main() {
+  const uint index = gl_GlobalInvocationID.x;
+  int upperLevel = int(lowerLevel + 1);
+
+  uint lowerAtlasProbeDiameter = config.atlasProbeDiameter * uint(pow(2, lowerLevel));
+  uint upperAtlasProbeDiameter = config.atlasProbeDiameter * uint(pow(2, upperLevel));
+
+  const uint probeRayCount = lowerAtlasProbeDiameter * lowerAtlasProbeDiameter;
+  const uint probeIndex = index / probeRayCount;
+  const uint probeRayIndex = index % probeRayCount;
+
+  const vec2 probeTexel = vec2(probeRayIndex % lowerAtlasProbeDiameter,
+                               probeRayIndex / lowerAtlasProbeDiameter);
+  const vec2 upperProbeTexel = probeTexel * 2.0;
+
+  MapResult upperSample;
+  vec3 t;
+  if (true) {
+    vec3 lowerProbeGridPos = vec3(MortonDecode(probeIndex));
+
+    vec3 index = (lowerProbeGridPos + 0.5) * lowerAtlasProbeDiameter /
+                   upperAtlasProbeDiameter -
+                 0.5;
+
+    vec3 upperProbeGridPos = clamp(floor(index),
+                                   vec3(0.0),
+                                   vec3(config.gridDiameter >> upperLevel));
+
+    vec3 hi = vec3((config.gridDiameter >> (lowerLevel + 1)));
+    MapResult c000 = MergeOffsetProbe(0, 0, 0);
+    MapResult c100 = MergeOffsetProbe(1, 0, 0);
+    MapResult c010 = MergeOffsetProbe(0, 1, 0);
+    MapResult c110 = MergeOffsetProbe(1, 1, 0);
+    MapResult c001 = MergeOffsetProbe(0, 0, 1);
+    MapResult c101 = MergeOffsetProbe(1, 0, 1);
+    MapResult c011 = MergeOffsetProbe(0, 1, 1);
+    MapResult c111 = MergeOffsetProbe(1, 1, 1);
+
+    t = fract(index);
+
+    upperSample = Lerp3D(c000, c100, c010, c110, c001, c101, c011, c111, t);
+  }
+
+  // write to the lower level
+  {
+    ivec2 probeOffset = ivec2(MortonDecode2D(probeIndex) *
+                              OCTAPROBE_PADDED_DIAMETER(lowerAtlasProbeDiameter));
+    ivec3 dst = ivec3(probeOffset + ivec2(probeTexel) + OCTAPROBE_PADDING, lowerLevel);
+    MapResult lowerSample = UnpackMapResult(texelFetch(octahedralProbeAtlasTexture, dst, 0));
+
+    MapResult result;
+    result.color = lowerSample.color + upperSample.color * lowerSample.throughput;
+    result.emission = lowerSample.emission + upperSample.emission * lowerSample.throughput;
+    result.throughput = lowerSample.throughput * upperSample.throughput;
+    imageStore(octahedralProbeAtlas, dst, PackMapResult(result));
+  }
+}

@@ -1,0 +1,67 @@
+#version 450
+#extension GL_EXT_scalar_block_layout : enable
+
+#include "../radiance-cascades/shared.h"
+
+layout(location = 0) uniform uint level;
+layout(location = 1) uniform vec2 rayRange;
+
+layout(std430, binding = 0) uniform RadianceCascadeConfigUBO {
+  RadianceCascadesConfig config;
+};
+
+layout(binding = 1, rgba32f) restrict uniform image2DArray octahedralProbeAtlas;
+
+#include "octahedral.glsl"
+#include "shared.glsl"
+#include <engine/gpu/morton.h>
+
+layout(local_size_x = 128) in;
+
+void
+main() {
+  uint atlasProbeDiameter = config.atlasProbeDiameter * uint(pow(2, level));
+  const uint probeRayCount = atlasProbeDiameter * atlasProbeDiameter;
+  const uint probeIndex = gl_GlobalInvocationID.x / probeRayCount;
+  const uint probeRayIndex = gl_GlobalInvocationID.x % probeRayCount;
+
+  const vec2 probeTexel = vec2(probeRayIndex % atlasProbeDiameter,
+                               probeRayIndex / atlasProbeDiameter);
+  vec2 probeUV = (probeTexel + 0.5) / float(atlasProbeDiameter);
+  vec3 rayDir = OctahedralDecode(probeUV);
+
+  const vec3 probeGridPos = vec3(MortonDecode(probeIndex));
+  const f32 gridDiameter = f32(config.gridDiameter >> level);
+  const f32 gridRadius = gridDiameter * 0.5;
+  const f32 cellDiameter = config.scale * f32(1 << level);
+  const f32 cellRadius = cellDiameter * 0.5;
+  vec3 probeCenter = ((probeGridPos + 0.5) * cellDiameter) - gridRadius * cellDiameter;
+  float t = rayRange.x;
+  const float MaxT = rayRange.y;
+  const float eps = 0.001;
+
+  MapResult write;
+  write.throughput = vec3(1.0);
+  write.emission = vec3(0.0);
+  write.color = vec3(0.0);
+
+  while (t < MaxT) {
+    vec3 pos = probeCenter + rayDir * t;
+    MapResult result = map(pos);
+
+    if (result.d <= eps) {
+      result.throughput = vec3(0.0);
+      write = result;
+      break;
+    }
+
+    t += max(0.000001, result.d);
+  }
+
+  ivec2 probeOffset = ivec2(MortonDecode2D(probeIndex) *
+                            OCTAPROBE_PADDED_DIAMETER(atlasProbeDiameter));
+
+  imageStore(octahedralProbeAtlas,
+             ivec3(probeOffset + OCTAPROBE_PADDING + probeTexel, level),
+             PackMapResult(write));
+}
